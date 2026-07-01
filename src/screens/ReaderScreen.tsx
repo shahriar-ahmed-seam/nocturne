@@ -339,7 +339,8 @@ const ReaderScreen: React.FC<ScreenProps<'Reader'>> = ({ route, navigation }) =>
                 paddingBottom: insets.bottom + 80,
               }}
               onEndReached={loadMore}
-              onEndReachedThreshold={0.3}
+              onEndReachedThreshold={0.6}
+              drawDistance={800}
               showsVerticalScrollIndicator={false}
               onScroll={handleListScroll}
               scrollEventThrottle={16}

@@ -93,16 +93,37 @@ export async function scanNovelFolder(
     }
   }
 
-  // ── Chapters folder ─────────────────────────────────────────────────────
+  // ── Locate chapter files ────────────────────────────────────────────────
+  // Preferred layout: a `chapters/` sub-folder.
+  // Fallback (Moon Reader-style): loose `.txt` files directly inside the
+  // novel folder. Either way we skip a folder with no readable text files.
   const chaptersDir = children.find((f) => f.isDirectory && f.name.toLowerCase() === 'chapters');
-  if (!chaptersDir) return null;
 
-  const chapListResult = await saf.listDirectory(chaptersDir.uri);
-  if (!chapListResult.ok) return null;
+  let chapterFiles: SafDocumentFile[];
+  let chaptersUri: SafUri;
 
-  const txtFiles = chapListResult.value
-    .filter((f) => f.isFile && f.name.toLowerCase().endsWith('.txt'))
-    .sort((a, b) => naturalCompare(a.name, b.name));
+  if (chaptersDir) {
+    const chapListResult = await saf.listDirectory(chaptersDir.uri);
+    if (!chapListResult.ok) return null;
+    chapterFiles = chapListResult.value.filter(
+      (f) => f.isFile && f.name.toLowerCase().endsWith('.txt'),
+    );
+    chaptersUri = chaptersDir.uri;
+  } else {
+    // Loose text files in the folder itself — treat each as a chapter.
+    // Exclude the optional description.txt so it isn't read as a chapter.
+    chapterFiles = children.filter(
+      (f) =>
+        f.isFile &&
+        f.name.toLowerCase().endsWith('.txt') &&
+        f.name.toLowerCase() !== 'description.txt',
+    );
+    chaptersUri = folderUri;
+  }
+
+  if (chapterFiles.length === 0) return null;
+
+  const txtFiles = [...chapterFiles].sort((a, b) => naturalCompare(a.name, b.name));
 
   const chapters: Chapter[] = txtFiles.map((f, i) => ({
     id: `${novelId}__${f.name}`,
@@ -117,7 +138,7 @@ export async function scanNovelFolder(
     id: novelId,
     title: folder.name,
     folderUri,
-    chaptersUri: chaptersDir.uri,
+    chaptersUri,
     coverUri: cover ? cover.uri : null,
     description,
     chapters,

@@ -77,13 +77,15 @@ Point Nocturne at a folder shaped like this:
 │       ├── Chapter 1 {A Girl}.txt
 │       ├── Chapter 2 {A Human}.txt
 │       └── ...
-└── Another Novel/
-    └── chapters/
-        └── Chapter 1.txt
+└── Another Novel/            ← loose .txt files also work (no chapters/ needed)
+    ├── Chapter 1.txt
+    └── Chapter 2.txt
 ```
 
 - Each top-level folder is one novel (folder name = title).
-- A `chapters/` subfolder is **required**; chapters are UTF-8 `.txt`, natural-sorted by filename.
+- Chapters are UTF-8 `.txt` files, natural-sorted by filename. Nocturne looks
+  for a `chapters/` subfolder first; if there isn't one, it treats the loose
+  `.txt` files sitting directly in the novel folder as the chapters.
 - `cover.(jpg|png|webp)` and `description.txt` are optional.
 
 ---

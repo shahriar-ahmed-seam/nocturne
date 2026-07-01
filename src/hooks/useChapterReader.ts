@@ -1,17 +1,22 @@
 /**
  * useChapterReader — drives the chunked file loading pipeline.
  *
- * Opens a ChunkReader for a chapter, feeds chunks through ParagraphParser,
- * and incrementally pushes parsed paragraphs to the Zustand readingStore.
+ * Opens a ChunkReader for a chapter, feeds 64 KB chunks through the streaming
+ * ParagraphParser, and incrementally pushes parsed paragraphs to the Zustand
+ * readingStore. This is what lets Nocturne open 50 MB+ chapter files smoothly:
+ * only a small window of text is ever materialised ahead of the reader, and
+ * FlashList virtualises what's on screen.
  *
- * Supports:
- *   - Initial load from byte 0 or a saved byteOffset
- *   - "Load more" pagination (called when the user scrolls near the bottom)
- *   - Clean teardown on chapter change / unmount
+ * Robustness for very large files:
+ *   - A single async iterator is reused for the whole chapter (no re-creation).
+ *   - A synchronous re-entrancy guard (`loadingRef`) prevents overlapping batch
+ *     reads when `onEndReached` fires rapidly during fast scrolling.
+ *   - The initial load keeps fetching until the viewport is comfortably filled,
+ *     so short first chunks don't stall `onEndReached`.
  *
  * Usage inside ReaderScreen:
  * ```tsx
- * const { loadInitial, loadMore, isReading, progress } = useChapterReader();
+ * const { loadInitial, loadMore, cleanup, getCurrentByteOffset } = useChapterReader();
  * useEffect(() => { loadInitial(chapter, savedByteOffset); }, [chapter]);
  * ```
  */
@@ -20,20 +25,34 @@ import { useCallback, useRef } from 'react';
 import { useReadingStore } from '../store/readingStore';
 import { SafStorageService } from '../storage/SafStorageService';
 import { ParagraphParser } from '../storage/ParagraphParser';
-import type { IChunkReader } from '../storage/ISafStorageService';
+import type { IChunkReader, SafResult } from '../storage/ISafStorageService';
+import type { FileChunk } from '../types/saf.types';
 import type { Chapter } from '../types/library.types';
 
-// Number of chunks to pre-fetch in each "load more" batch.
-const CHUNKS_PER_BATCH = 5;
+/** Chunks fetched per batch. 4 × 64 KB = 256 KB — enough to stay ahead of a
+ *  fast scroll without blocking the JS thread for long. */
+const CHUNKS_PER_BATCH = 4;
+
+/** Keep loading on first open until at least this many paragraphs exist, so the
+ *  screen is filled and `onEndReached` can take over. */
+const MIN_INITIAL_PARAGRAPHS = 30;
+
+/** Safety valve: never loop the initial fill more than this many batches. */
+const MAX_INITIAL_BATCHES = 24;
+
+type ChunkIterator = AsyncIterator<FileChunk>;
 
 export function useChapterReader() {
   const appendParagraphs = useReadingStore((s) => s.appendParagraphs);
   const setLoadingChunk = useReadingStore((s) => s.setLoadingChunk);
-  const isLoadingChunk = useReadingStore((s) => s.isLoadingChunk);
 
   const readerRef = useRef<IChunkReader | null>(null);
+  const iteratorRef = useRef<ChunkIterator | null>(null);
   const parserRef = useRef<ParagraphParser>(new ParagraphParser());
   const eofRef = useRef(false);
+  /** Synchronous guard — more reliable than the async store flag under rapid
+   *  onEndReached bursts. */
+  const loadingRef = useRef(false);
 
   /** Tear down any existing reader and parser state. */
   const cleanup = useCallback(async () => {
@@ -41,38 +60,36 @@ export function useChapterReader() {
       await readerRef.current.close();
       readerRef.current = null;
     }
+    iteratorRef.current = null;
     parserRef.current.reset();
     eofRef.current = false;
+    loadingRef.current = false;
   }, []);
 
   /**
-   * Read the next N chunks and push parsed paragraphs to the store.
-   * Called by `loadInitial` and by the FlashList `onEndReached`.
+   * Read up to CHUNKS_PER_BATCH chunks and push parsed paragraphs to the store.
+   * Returns the number of new paragraphs appended (0 at EOF).
    */
-  const readBatch = useCallback(async () => {
-    const reader = readerRef.current;
-    if (!reader || eofRef.current) return;
+  const readBatch = useCallback(async (): Promise<number> => {
+    const iterator = iteratorRef.current;
+    if (!iterator || eofRef.current) return 0;
 
     const parser = parserRef.current;
     const allNew: string[] = [];
 
     for (let i = 0; i < CHUNKS_PER_BATCH; i++) {
-      const iterResult = await reader[Symbol.asyncIterator]().next();
+      const iterResult = await iterator.next();
       if (iterResult.done) {
         eofRef.current = true;
-        // Flush remaining text as the final paragraphs
-        const flushed = parser.flush();
-        flushed.forEach((p) => allNew.push(p.text));
+        parser.flush().forEach((p) => allNew.push(p.text));
         break;
       }
       const chunk = iterResult.value;
-      const parsed = parser.ingest(chunk);
-      parsed.forEach((p) => allNew.push(p.text));
+      parser.ingest(chunk).forEach((p) => allNew.push(p.text));
 
       if (chunk.isEof) {
         eofRef.current = true;
-        const flushed = parser.flush();
-        flushed.forEach((p) => allNew.push(p.text));
+        parser.flush().forEach((p) => allNew.push(p.text));
         break;
       }
     }
@@ -80,49 +97,74 @@ export function useChapterReader() {
     if (allNew.length > 0) {
       appendParagraphs(allNew);
     }
+    return allNew.length;
   }, [appendParagraphs]);
 
   /**
-   * Open a fresh ChunkReader for the given chapter and load the first batch.
-   * Cleans up any prior reader first.
+   * Open a fresh ChunkReader for the given chapter and load enough to fill the
+   * viewport. Cleans up any prior reader first.
    */
   const loadInitial = useCallback(
     async (chapter: Chapter, fromByte?: number) => {
       await cleanup();
+      loadingRef.current = true;
       setLoadingChunk(true);
 
-      const saf = SafStorageService.getInstance();
-      const result = await saf.createChunkReader(chapter.uri, undefined, fromByte);
+      try {
+        const saf = SafStorageService.getInstance();
+        const result: SafResult<IChunkReader> = await saf.createChunkReader(
+          chapter.uri,
+          undefined,
+          fromByte,
+        );
 
-      if (!result.ok) {
-        console.error('[ChapterReader] Failed to open:', result.error.message);
+        if (!result.ok) {
+          console.error('[ChapterReader] Failed to open:', result.error.message);
+          return;
+        }
+
+        readerRef.current = result.value;
+        iteratorRef.current = result.value[Symbol.asyncIterator]();
+
+        // Fill the first screen: keep reading until we have enough paragraphs
+        // or we hit EOF, capped so a pathological file can't loop forever.
+        let total = 0;
+        let batches = 0;
+        while (total < MIN_INITIAL_PARAGRAPHS && !eofRef.current && batches < MAX_INITIAL_BATCHES) {
+          total += await readBatch();
+          batches += 1;
+        }
+      } finally {
+        loadingRef.current = false;
         setLoadingChunk(false);
-        return;
       }
-
-      readerRef.current = result.value;
-      await readBatch();
-      setLoadingChunk(false);
     },
     [cleanup, setLoadingChunk, readBatch],
   );
 
   /**
-   * "Load more" trigger — designed to be called from FlashList's `onEndReached`.
+   * "Load more" trigger — wired to FlashList's `onEndReached`. The synchronous
+   * `loadingRef` guard drops overlapping calls so we never read the same stream
+   * region twice or thrash the store.
    */
   const loadMore = useCallback(async () => {
-    if (eofRef.current || isLoadingChunk) return;
+    if (eofRef.current || loadingRef.current) return;
+    loadingRef.current = true;
     setLoadingChunk(true);
-    await readBatch();
-    setLoadingChunk(false);
-  }, [readBatch, isLoadingChunk, setLoadingChunk]);
+    try {
+      await readBatch();
+    } finally {
+      loadingRef.current = false;
+      setLoadingChunk(false);
+    }
+  }, [readBatch, setLoadingChunk]);
 
   /** Byte offset of the reader — used for progress persistence. */
   const getCurrentByteOffset = useCallback((): number => {
     return readerRef.current?.currentOffset ?? 0;
   }, []);
 
-  /** Total bytes in the file — for progress bar percentage. */
+  /** Total bytes in the file — for byte-based progress percentage. */
   const getTotalBytes = useCallback((): number => {
     return readerRef.current?.totalBytes ?? 0;
   }, []);
