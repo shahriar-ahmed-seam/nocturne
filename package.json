@@ -1,0 +1,65 @@
+{
+  "name": "nocturne",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Nocturne — a cinematic, offline-first novel reader for Android. Stream 50 MB+ chapter files with a native chunked reader, immersive typography, TTS, and portable progress backups. Your library, your storage, no account.",
+  "keywords": [
+    "react-native",
+    "android",
+    "novel-reader",
+    "ebook-reader",
+    "offline-first",
+    "storage-access-framework",
+    "text-to-speech",
+    "kotlin-native-module",
+    "typescript"
+  ],
+  "license": "MIT",
+  "author": "Shahriar Ahmed",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/shahriar-ahmed-seam/nocturne.git"
+  },
+  "engines": {
+    "node": ">=18"
+  },
+  "scripts": {
+    "android": "react-native run-android",
+    "start": "react-native start",
+    "lint": "eslint . --ext .ts,.tsx",
+    "type-check": "tsc --noEmit",
+    "test": "jest",
+    "build:android": "cd android && gradlew.bat assembleRelease",
+    "clean:android": "cd android && gradlew.bat clean"
+  },
+  "dependencies": {
+    "@react-navigation/native": "^6.1.17",
+    "@react-navigation/stack": "^6.3.29",
+    "@shopify/flash-list": "1.6.3",
+    "immer": "^10.0.4",
+    "react": "18.2.0",
+    "react-native": "0.73.6",
+    "react-native-blob-util": "^0.19.8",
+    "react-native-gesture-handler": "2.16.1",
+    "react-native-mmkv": "^2.12.2",
+    "react-native-reanimated": "^3.9.0",
+    "react-native-saf-x": "^2.2.3",
+    "react-native-safe-area-context": "4.9.0",
+    "react-native-screens": "3.30.1",
+    "react-native-tts": "^4.1.0",
+    "zustand": "^4.5.2"
+  },
+  "devDependencies": {
+    "@babel/core": "^7.20.0",
+    "@babel/preset-env": "^7.20.0",
+    "@babel/runtime": "^7.20.0",
+    "@react-native/babel-preset": "0.73.21",
+    "@react-native/eslint-config": "0.73.2",
+    "@react-native/metro-config": "0.73.5",
+    "@react-native/typescript-config": "0.73.1",
+    "@types/react": "^18.2.6",
+    "eslint": "^8.19.0",
+    "prettier": "2.8.8",
+    "typescript": "5.0.4"
+  }
+}

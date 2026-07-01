@@ -1,0 +1,15 @@
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="108dp"
+    android:height="108dp"
+    android:viewportWidth="108"
+    android:viewportHeight="108">
+  <!-- Crescent moon (carved via even-odd fill) -->
+  <path
+      android:fillColor="#FFFFFF"
+      android:fillType="evenOdd"
+      android:pathData="M30,56 a24,24 0 1,0 48,0 a24,24 0 1,0 -48,0 Z M46,44 a20,20 0 1,0 40,0 a20,20 0 1,0 -40,0 Z" />
+  <!-- Small four-point star -->
+  <path
+      android:fillColor="#7B78F2"
+      android:pathData="M73,64 l1.8,5 l5,1.8 l-5,1.8 l-1.8,5 l-1.8,-5 l-5,-1.8 l5,-1.8 Z" />
+</vector>

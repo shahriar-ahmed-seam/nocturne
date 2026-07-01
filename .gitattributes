@@ -1,0 +1,12 @@
+# Normalise line endings — LF in the repo, checkout as-is.
+* text=auto eol=lf
+
+# Binary assets — never normalise.
+*.png binary
+*.jpg binary
+*.jpeg binary
+*.webp binary
+*.keystore binary
+*.jar binary
+*.aab binary
+*.apk binary
