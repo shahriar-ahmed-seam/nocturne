@@ -45,6 +45,18 @@ export interface ReadingState {
   /** Index into `paragraphs` that is currently visible on screen. */
   visibleParagraphIndex: number;
   /**
+   * Byte offset in the source file where each paragraph begins, parallel to
+   * `paragraphs`. Kept even for released paragraphs so they can be re-read
+   * from disk when the reader scrolls back to them.
+   */
+  paragraphOffsets: number[];
+  /**
+   * Sliding-window low-water mark: paragraphs with index < releasedUpTo have
+   * had their text released (set to '') to cap memory on huge chapters. Their
+   * indices and byte offsets are preserved; they re-hydrate on scroll-back.
+   */
+  releasedUpTo: number;
+  /**
    * True while the chunk reader is fetching the next batch of paragraphs.
    * Drives the "loading more…" footer in the virtualized list.
    */
@@ -79,9 +91,13 @@ export interface ReadingActions {
   closeReader(): void;
 
   // Paragraph / chunk management
-  appendParagraphs(newParagraphs: string[]): void;
+  appendParagraphs(newParagraphs: string[], offsets?: number[]): void;
   setVisibleParagraphIndex(index: number): void;
   setLoadingChunk(loading: boolean): void;
+  /** Release the text of paragraphs below `cutoffIndex` to cap memory. */
+  releaseParagraphsBefore(cutoffIndex: number): void;
+  /** Restore a previously-released paragraph's text (re-read from disk). */
+  rehydrateParagraph(index: number, text: string): void;
 
   // Progress
   savePosition(position: ReadingPosition): void;
@@ -112,6 +128,8 @@ export const useReadingStore = create<ReadingStore>()(
     activeChapter: null,
     paragraphs: [],
     visibleParagraphIndex: 0,
+    paragraphOffsets: [],
+    releasedUpTo: 0,
     isLoadingChunk: false,
     settings: loadSettings(),
     tts: { status: 'idle', activeParagraphIndex: null, errorMessage: null },
@@ -126,6 +144,8 @@ export const useReadingStore = create<ReadingStore>()(
         state.activeNovelId = novelId;
         state.activeChapter = chapter;
         state.paragraphs = [];
+        state.paragraphOffsets = [];
+        state.releasedUpTo = 0;
         state.visibleParagraphIndex = 0;
         state.isLoadingChunk = true;
         state.tts = { status: 'idle', activeParagraphIndex: null, errorMessage: null };
@@ -137,13 +157,35 @@ export const useReadingStore = create<ReadingStore>()(
         state.activeNovelId = null;
         state.activeChapter = null;
         state.paragraphs = [];
+        state.paragraphOffsets = [];
+        state.releasedUpTo = 0;
         state.visibleParagraphIndex = 0;
         state.tts = { status: 'idle', activeParagraphIndex: null, errorMessage: null };
       }),
 
-    appendParagraphs: (newParagraphs) =>
+    appendParagraphs: (newParagraphs, offsets) =>
       set((state) => {
         state.paragraphs.push(...newParagraphs);
+        for (let i = 0; i < newParagraphs.length; i++) {
+          state.paragraphOffsets.push(offsets?.[i] ?? -1);
+        }
+      }),
+
+    releaseParagraphsBefore: (cutoffIndex) =>
+      set((state) => {
+        if (cutoffIndex <= state.releasedUpTo) return;
+        const end = Math.min(cutoffIndex, state.paragraphs.length);
+        for (let i = state.releasedUpTo; i < end; i++) {
+          state.paragraphs[i] = '';
+        }
+        state.releasedUpTo = end;
+      }),
+
+    rehydrateParagraph: (index, text) =>
+      set((state) => {
+        if (index >= 0 && index < state.paragraphs.length) {
+          state.paragraphs[index] = text;
+        }
       }),
 
     setVisibleParagraphIndex: (index) =>

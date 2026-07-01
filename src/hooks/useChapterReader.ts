@@ -76,26 +76,36 @@ export function useChapterReader() {
 
     const parser = parserRef.current;
     const allNew: string[] = [];
+    const allOffsets: number[] = [];
 
     for (let i = 0; i < CHUNKS_PER_BATCH; i++) {
       const iterResult = await iterator.next();
       if (iterResult.done) {
         eofRef.current = true;
-        parser.flush().forEach((p) => allNew.push(p.text));
+        parser.flush().forEach((p) => {
+          allNew.push(p.text);
+          allOffsets.push(p.approximateByteOffset);
+        });
         break;
       }
       const chunk = iterResult.value;
-      parser.ingest(chunk).forEach((p) => allNew.push(p.text));
+      parser.ingest(chunk).forEach((p) => {
+        allNew.push(p.text);
+        allOffsets.push(p.approximateByteOffset);
+      });
 
       if (chunk.isEof) {
         eofRef.current = true;
-        parser.flush().forEach((p) => allNew.push(p.text));
+        parser.flush().forEach((p) => {
+          allNew.push(p.text);
+          allOffsets.push(p.approximateByteOffset);
+        });
         break;
       }
     }
 
     if (allNew.length > 0) {
-      appendParagraphs(allNew);
+      appendParagraphs(allNew, allOffsets);
     }
     return allNew.length;
   }, [appendParagraphs]);
@@ -169,6 +179,41 @@ export function useChapterReader() {
     return readerRef.current?.totalBytes ?? 0;
   }, []);
 
+  /**
+   * Re-read a single paragraph's text from disk at a known byte offset.
+   * Used to re-hydrate a paragraph whose text was released by the memory
+   * window when the reader scrolls back to it. Opens a short-lived reader so
+   * it never disturbs the main forward-reading stream.
+   */
+  const rehydrateFromOffset = useCallback(async (byteOffset: number): Promise<string | null> => {
+    if (byteOffset < 0) return null;
+    const chapter = useReadingStore.getState().activeChapter;
+    if (!chapter) return null;
+
+    const saf = SafStorageService.getInstance();
+    const result = await saf.createChunkReader(chapter.uri, undefined, byteOffset);
+    if (!result.ok) return null;
+
+    const reader = result.value;
+    try {
+      const iterator = reader[Symbol.asyncIterator]();
+      const parser = new ParagraphParser();
+      for (let i = 0; i < 4; i++) {
+        const r = await iterator.next();
+        if (r.done) break;
+        const parsed = parser.ingest(r.value);
+        if (parsed.length > 0) return parsed[0]?.text ?? null;
+        if (r.value.isEof) break;
+      }
+      const flushed = parser.flush();
+      return flushed[0]?.text ?? null;
+    } catch {
+      return null;
+    } finally {
+      await reader.close();
+    }
+  }, []);
+
   return {
     loadInitial,
     loadMore,
@@ -176,5 +221,6 @@ export function useChapterReader() {
     isEof: eofRef.current,
     getCurrentByteOffset,
     getTotalBytes,
+    rehydrateFromOffset,
   };
 }

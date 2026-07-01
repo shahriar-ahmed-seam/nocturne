@@ -59,6 +59,7 @@ It's engineered for the reader who follows 400-chapter web serials, keeps decade
 ### Under the hood
 - **Native chunked reader** (Kotlin) with **byte-accurate UTF-8 boundary correction** — multi-byte characters are never split across chunks.
 - **Streaming paragraph parser** that buffers incomplete paragraphs across chunk boundaries.
+- **Bounded-memory sliding window** — while reading a huge single chapter, far-behind paragraphs have their text released to cap memory; their byte offsets and (measured) heights are kept, so scrolling never jumps and revisited paragraphs re-hydrate from disk on demand.
 - **Dual position anchor** — every position is stored as both a `byteOffset` (for seeking) and a `paragraphIndex` (for scrolling), so resume survives font changes and reinstalls.
 
 ---

@@ -50,6 +50,12 @@ import { SPACING, RADIUS, getPalette, FONT_FAMILY_MAP, FONT_FAMILY_LABELS } from
 
 const AUTOSAVE_INTERVAL_MS = 5_000;
 const AUTOSCROLL_TICK_MS = 50;
+/** Sliding-window memory cap: keep this many paragraphs live behind the
+ *  viewport; release older ones (freeing their text) and re-hydrate on
+ *  scroll-back. Generous so normal chapters never trigger it. */
+const KEEP_BEHIND_PARAGRAPHS = 800;
+/** Only release in batches this large to avoid churning the big array. */
+const RELEASE_BATCH = 200;
 const THEME_OPTIONS: { key: ReaderTheme; label: string }[] = [
   { key: 'light', label: 'Light' },
   { key: 'dark', label: 'Dark' },
@@ -77,6 +83,8 @@ const ReaderScreen: React.FC<ScreenProps<'Reader'>> = ({ route, navigation }) =>
   const persistProgress = useReadingStore((s) => s.persistProgress);
   const updateSettings = useReadingStore((s) => s.updateSettings);
   const addBookmark = useReadingStore((s) => s.addBookmark);
+  const releaseParagraphsBefore = useReadingStore((s) => s.releaseParagraphsBefore);
+  const rehydrateParagraph = useReadingStore((s) => s.rehydrateParagraph);
 
   // ── TTS ──────────────────────────────────────────────────────────────────
   const { toggleTts, stopTts, isSpeaking, isPaused } = useTts();
@@ -90,7 +98,8 @@ const ReaderScreen: React.FC<ScreenProps<'Reader'>> = ({ route, navigation }) =>
   );
 
   // ── Chunk reader ─────────────────────────────────────────────────────────
-  const { loadInitial, loadMore, cleanup, getCurrentByteOffset } = useChapterReader();
+  const { loadInitial, loadMore, cleanup, getCurrentByteOffset, rehydrateFromOffset } =
+    useChapterReader();
 
   // ── UI state ─────────────────────────────────────────────────────────────
   const [showOverlay, setShowOverlay] = useState(false);
@@ -99,6 +108,8 @@ const ReaderScreen: React.FC<ScreenProps<'Reader'>> = ({ route, navigation }) =>
   const [autoScroll, setAutoScroll] = useState(false);
   const listRef = useRef<FlashList<string>>(null);
   const scrollOffsetRef = useRef(0);
+  const heightCacheRef = useRef<Map<number, number>>(new Map());
+  const rehydratingRef = useRef<Set<number>>(new Set());
   const overlayOpacity = useSharedValue(0);
 
   // ── Load chapter on mount / chapter change ──────────────────────────────
@@ -106,8 +117,15 @@ const ReaderScreen: React.FC<ScreenProps<'Reader'>> = ({ route, navigation }) =>
     const progress = useReadingStore.getState().progressMap[novelId as NovelId];
     const fromByte = progress?.lastReadChapterUri === chapter.uri ? progress.byteOffset : 0;
 
-    // Clear current paragraphs
-    useReadingStore.setState({ paragraphs: [], visibleParagraphIndex: 0 });
+    // Clear current paragraphs + sliding-window state and per-chapter caches
+    heightCacheRef.current.clear();
+    rehydratingRef.current.clear();
+    useReadingStore.setState({
+      paragraphs: [],
+      paragraphOffsets: [],
+      releasedUpTo: 0,
+      visibleParagraphIndex: 0,
+    });
     useReadingStore.setState({
       activeNovelId: novelId,
       activeChapter: chapter,
@@ -209,39 +227,90 @@ const ReaderScreen: React.FC<ScreenProps<'Reader'>> = ({ route, navigation }) =>
       }
     });
 
-  // ── Viewability tracking (for saving paragraph index) ───────────────────
+  // ── Viewability tracking + sliding-window memory management ─────────────
+  /** Re-read a released paragraph's text from disk, once per index. */
+  const scheduleRehydrate = useCallback(
+    (index: number) => {
+      if (rehydratingRef.current.has(index)) return;
+      rehydratingRef.current.add(index);
+      const offset = useReadingStore.getState().paragraphOffsets[index] ?? -1;
+      void (async () => {
+        try {
+          const text = await rehydrateFromOffset(offset);
+          if (text) rehydrateParagraph(index, text);
+        } finally {
+          rehydratingRef.current.delete(index);
+        }
+      })();
+    },
+    [rehydrateFromOffset, rehydrateParagraph],
+  );
+
   const viewabilityConfig = useRef({ itemVisiblePercentThreshold: 60 });
-  const onViewableItemsChanged = useRef(({ viewableItems }: { viewableItems: ViewToken[] }) => {
-    if (viewableItems.length > 0) {
+  const onViewableItemsChanged = useCallback(
+    ({ viewableItems }: { viewableItems: ViewToken[] }) => {
+      if (viewableItems.length === 0) return;
+
       const first = viewableItems[0]!;
       if (typeof first.index === 'number') {
         setVisibleParagraphIndex(first.index);
+
+        // Release far-behind paragraphs to cap memory on huge chapters.
+        const cutoff = first.index - KEEP_BEHIND_PARAGRAPHS;
+        const releasedUpTo = useReadingStore.getState().releasedUpTo;
+        if (cutoff > releasedUpTo + RELEASE_BATCH) {
+          releaseParagraphsBefore(cutoff);
+        }
       }
-    }
-  });
+
+      // Re-hydrate any visible paragraph whose text was released.
+      const paragraphs = useReadingStore.getState().paragraphs;
+      for (const token of viewableItems) {
+        if (typeof token.index === 'number' && paragraphs[token.index] === '') {
+          scheduleRehydrate(token.index);
+        }
+      }
+    },
+    [setVisibleParagraphIndex, releaseParagraphsBefore, scheduleRehydrate],
+  );
 
   // ── Render paragraph ────────────────────────────────────────────────────
   const renderParagraph = useCallback(
     ({ item, index }: { item: string; index: number }) => {
+      // Released by the memory window → reserve its measured height so the
+      // scroll position never jumps; the viewability handler re-hydrates it.
+      if (item === '') {
+        const reserved =
+          heightCacheRef.current.get(index) ??
+          settings.fontSize * settings.lineHeight * 3 + settings.paragraphSpacing;
+        return <View style={{ height: reserved }} />;
+      }
+
       const ttsIdx = useReadingStore.getState().tts.activeParagraphIndex;
       const isHighlighted = ttsIdx === index;
 
       return (
-        <Text
-          style={[
-            styles.paragraph,
-            {
-              color: palette.readerText,
-              fontFamily: FONT_FAMILY_MAP[settings.fontFamily],
-              fontSize: settings.fontSize,
-              lineHeight: settings.fontSize * settings.lineHeight,
-              marginBottom: settings.paragraphSpacing,
-              backgroundColor: isHighlighted ? palette.readerHighlight : 'transparent',
-            },
-          ]}
+        <View
+          onLayout={(e) => {
+            heightCacheRef.current.set(index, e.nativeEvent.layout.height);
+          }}
         >
-          {item}
-        </Text>
+          <Text
+            style={[
+              styles.paragraph,
+              {
+                color: palette.readerText,
+                fontFamily: FONT_FAMILY_MAP[settings.fontFamily],
+                fontSize: settings.fontSize,
+                lineHeight: settings.fontSize * settings.lineHeight,
+                marginBottom: settings.paragraphSpacing,
+                backgroundColor: isHighlighted ? palette.readerHighlight : 'transparent',
+              },
+            ]}
+          >
+            {item}
+          </Text>
+        </View>
       );
     },
     [
@@ -344,7 +413,7 @@ const ReaderScreen: React.FC<ScreenProps<'Reader'>> = ({ route, navigation }) =>
               showsVerticalScrollIndicator={false}
               onScroll={handleListScroll}
               scrollEventThrottle={16}
-              onViewableItemsChanged={onViewableItemsChanged.current}
+              onViewableItemsChanged={onViewableItemsChanged}
               viewabilityConfig={viewabilityConfig.current}
               ListFooterComponent={
                 isLoadingChunk ? (

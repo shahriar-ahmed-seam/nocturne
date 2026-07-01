@@ -76,3 +76,21 @@ ChunkReader (native, 64 KB) → ParagraphParser.ingest() → readingStore.append
 
 `useChapterReader` drives batches of chunks on `onEndReached`; `useTts` walks the
 same paragraph array for hands-free playback.
+
+## Bounded memory on huge chapters
+
+Reading forward through a hundreds-of-MB single chapter would otherwise grow the
+in-memory paragraph array without bound. Nocturne applies a sliding window:
+
+- Paragraphs more than `KEEP_BEHIND_PARAGRAPHS` behind the viewport have their
+  **text released** (`''`) — freeing the large strings — while their **index**
+  and **byte offset** are preserved (offsets are cheap numbers).
+- Each rendered paragraph's measured height is cached, so a released paragraph
+  renders as a **height-preserving placeholder** — the scroll position never
+  jumps.
+- When the reader scrolls back to a released paragraph, it is **re-hydrated**
+  by re-reading a single chunk from its stored byte offset via a short-lived
+  reader that never disturbs the main forward stream.
+
+Forward reading (the common path) is untouched; the window only engages on
+pathologically large single files.
